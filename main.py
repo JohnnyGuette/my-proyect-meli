@@ -11,7 +11,7 @@ def logAnalysisFunction(request):
 
     client = cloud_logging.Client(project=project_id)
     now = datetime.utcnow()
-    past = now - timedelta(days=1)  # 1 día de logs
+    past = now - timedelta(hours=8)
 
     now_str = now.isoformat("T") + "Z"
     past_str = past.isoformat("T") + "Z"
@@ -26,33 +26,48 @@ def logAnalysisFunction(request):
 
     vulnerabilities = []
     mitigation_actions = []
+    ip_access_count = {}
 
     entries = list(client.list_entries(order_by=cloud_logging.DESCENDING, filter_=query, page_size=100))
 
     for entry in entries:
         if isinstance(entry.payload, dict):
             payload = entry.payload
-            httpRequest = payload.get('httpRequest', {})
+            httpRequest = entry.http_request
             
             if isinstance(httpRequest, dict):
                 requestUrl = httpRequest.get('requestUrl', '')
                 requestMethod = httpRequest.get('requestMethod', '')
-                requestBody = payload.get('requestBody', '')
+                sourceIp = httpRequest.get('remoteIp', '')
+                timestamp = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-                # Patrón de inyección SQL básico
+                if sourceIp:
+                    if sourceIp not in ip_access_count:
+                        ip_access_count[sourceIp] = 0
+                    ip_access_count[sourceIp] += 1
+
                 sql_injection_pattern = r"(?i)id=1(?:'|%27)\+OR\+(?:'|%27)1(?:'|%27)%3D(?:'|%27)1"
                 sql_injection_matches = re.findall(sql_injection_pattern, requestUrl)
 
-                if sql_injection_matches or xss_injection_matches:
-                    vulnerability_message = f"Solicitud sospechosa: {requestUrl}"
-                    if sql_injection_matches:
-                        vulnerability_message += " (Posible inyección SQL)"
-
+                if sql_injection_matches:
+                    vulnerability_message = f"Solicitud sospechosa: {timestamp} - {requestUrl} (Posible inyección SQL)"
+                    vulnerabilities.append(vulnerability_message)
                     mitigation_action = "Bloquear la solicitud"
                     mitigation_actions.append(mitigation_action)
+
+    rate_limit_threshold = 20
+    for ip, count in ip_access_count.items():
+        if count > rate_limit_threshold:
+            vulnerability_message = f"Posible ataque DDOS: IP {ip} excedió el umbral con {count} solicitudes"
+            vulnerabilities.append(vulnerability_message)
+            mitigation_action = "Bloquear la IP origen"
+            mitigation_actions.append(mitigation_action)
+
     response = {
-        'vulnerabilities': vulnerabilities,
-        'mitigation_actions': mitigation_actions
+        'vulnerabilities_mitigation': [
+            {'vulnerabilities': vulnerabilities,'mitigation_actions': mitigation_actions}
+            for vulnerabilities, mitigation_actions in zip(vulnerabilities, mitigation_actions)
+        ]
     }
 
     logger.info(f"Respuesta generada: {response}")
